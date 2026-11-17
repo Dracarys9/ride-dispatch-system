@@ -5,8 +5,10 @@ import { z } from "zod";
 import { createRedisClient, DISPATCH_QUEUE_NAME } from "../../config/redis";
 import { publishRideEvent } from "../../events/eventPublisher";
 import {
+  claimIdempotencyKey,
   createRide,
   getRideById,
+  releaseIdempotencyKey,
 } from "../../repositories/rideRepository";
 import { Ride } from "../../types/ride";
 
@@ -24,6 +26,10 @@ export const createRideSchema = z.object({
 export const router = Router();
 
 router.post("/", async (req: Request, res: Response, next) => {
+  const idempotencyKey = req.header("Idempotency-Key")?.trim();
+  let idempotencyClaimed = false;
+  let ridePersisted = false;
+
   try {
     const parsedInput = createRideSchema.safeParse(req.body);
     if (!parsedInput.success) {
@@ -34,10 +40,28 @@ router.post("/", async (req: Request, res: Response, next) => {
       return;
     }
 
-    const rideId = `ride_${uuidv4().slice(0, 8)}`;
+    const candidateRideId = `ride_${uuidv4().slice(0, 8)}`;
+    if (idempotencyKey) {
+      const resolvedRideId = await claimIdempotencyKey(
+        idempotencyKey,
+        candidateRideId,
+      );
+      if (resolvedRideId !== candidateRideId) {
+        const existingRide = await getRideById(resolvedRideId);
+        res.status(200).json({
+          rideId: resolvedRideId,
+          status: existingRide?.status ?? "REQUESTED",
+          idempotentReplay: true,
+          message: "Existing ride returned for Idempotency-Key",
+        });
+        return;
+      }
+      idempotencyClaimed = true;
+    }
+
     const timestamp = new Date().toISOString();
     const ride: Ride = {
-      rideId,
+      rideId: candidateRideId,
       riderId: parsedInput.data.riderId,
       pickupLocation: parsedInput.data.pickupLocation,
       dropoffLocation: parsedInput.data.dropoffLocation,
@@ -49,23 +73,34 @@ router.post("/", async (req: Request, res: Response, next) => {
     };
 
     await createRide(ride);
+    ridePersisted = true;
     await dispatchQueue.add(
       "dispatch-ride",
-      { rideId },
+      { rideId: candidateRideId },
       { removeOnComplete: 500, removeOnFail: 500 },
     );
     await publishRideEvent({
-      rideId,
+      rideId: candidateRideId,
       status: ride.status,
       driverId: ride.assignedDriverId,
     });
 
     res.status(202).json({
-      rideId,
+      rideId: candidateRideId,
       status: ride.status,
       message: "Ride booked and queued for dispatch",
     });
   } catch (error) {
+    if (idempotencyKey && idempotencyClaimed && !ridePersisted) {
+      try {
+        await releaseIdempotencyKey(idempotencyKey);
+      } catch (releaseError) {
+        console.error(
+          `[API] Failed to release Idempotency-Key ${idempotencyKey}`,
+          releaseError,
+        );
+      }
+    }
     next(error);
   }
 });

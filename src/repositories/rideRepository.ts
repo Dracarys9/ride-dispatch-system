@@ -7,6 +7,24 @@ export const rideKey = (rideId: string): string => `ride:${rideId}`;
 export const ALL_RIDES_SET = "rides:all";
 export const driverLockKey = (driverId: string): string => `driver:lock:${driverId}`;
 
+export async function claimIdempotencyKey(
+  key: string,
+  rideId: string,
+  ttlSeconds = 3600,
+): Promise<string> {
+  const idempotencyKey = `idempotency:${key}`;
+  const result = await redis.set(idempotencyKey, rideId, "EX", ttlSeconds, "NX");
+  if (result === "OK") {
+    return rideId;
+  }
+
+  return (await redis.get(idempotencyKey)) ?? rideId;
+}
+
+export async function releaseIdempotencyKey(key: string): Promise<void> {
+  await redis.del(`idempotency:${key}`);
+}
+
 export async function createRide(ride: Ride): Promise<void> {
   await redis
     .multi()
