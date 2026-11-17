@@ -129,6 +129,27 @@ curl -X POST http://localhost:3000/rides \
 }
 ```
 
+#### Idempotent booking
+
+Send an `Idempotency-Key` to safely retry the same booking request. Replays return `200 OK` with the original ride ID and `idempotentReplay: true`, without creating another queue job or event:
+
+```bash
+curl -X POST http://localhost:3000/rides \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: booking-rider-001" \
+  -d '{"riderId":"rider_001","pickupLocation":"Bandra West, Mumbai","dropoffLocation":"Powai, Mumbai"}'
+```
+
+#### Deterministic rejection demo
+
+Use `?forceReject=true` (or the `X-Simulate-Reject: true` header) to force three delayed driver rejections and verify the `NO_DRIVER_FOUND` transition:
+
+```bash
+curl -X POST "http://localhost:3000/rides?forceReject=true" \
+  -H "Content-Type: application/json" \
+  -d '{"riderId":"rider_chaos","pickupLocation":"Bandra West, Mumbai","dropoffLocation":"Powai, Mumbai"}'
+```
+
 ### Get ride status
 
 ```bash
@@ -155,6 +176,21 @@ curl http://localhost:3000/rides/ride_7f3a12bc
   "createdAt": "2026-11-17T06:20:00.000Z",
   "updatedAt": "2026-11-17T06:20:00.300Z"
 }
+```
+
+### Live ride status stream
+
+Subscribe to real-time status events with Server-Sent Events. The stream sends an initial snapshot and closes automatically when the ride reaches `ASSIGNED` or `NO_DRIVER_FOUND`:
+
+```bash
+curl -N http://localhost:3000/rides/ride_7f3a12bc/stream
+```
+
+Example event:
+
+```text
+event: status
+data: {"rideId":"ride_7f3a12bc","status":"ASSIGNED","driverId":"drv_04","timestamp":"2026-11-17T06:20:00.300Z"}
 ```
 
 ## Project Structure
