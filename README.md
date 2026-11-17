@@ -41,107 +41,125 @@ A production-inspired, distributed ride-hailing dispatch engine built with **Nod
       └──────────────────────────────┘                  └──────────────────────────────┘
 ```
 
-## Key Engineering Highlights
+---
 
-* **Non-Blocking Ingestion (`202 Accepted`):** `POST /rides` validates payloads via `zod`, saves initial state (`REQUESTED`), enqueues a dispatch job onto BullMQ, publishes a `REQUESTED` event, and responds immediately without blocking on driver negotiation.
-* **Distributed Concurrency Safety:** Workers acquire short-lived locks (`SET driver:lock:<id> <rideId> PX 3000 NX`) before offering a ride to a driver and release them inside a `try/finally` block using an atomic Lua compare-and-delete script—preventing double-assignments across concurrent threads.
-* **Deterministic Retry Cap:** Each ride tracks tried drivers in a `Set` so no driver is offered the same ride twice, capping attempts at **3 distinct rejections** before transitioning to `NO_DRIVER_FOUND`.
-* **True Fan-Out & Idempotent Billing:** Redis Pub/Sub broadcasts every transition to both standalone consumers simultaneously. `billing-consumer` deduplicates events via `SADD billing:processed_events <eventId>` so riders are charged once and only on `ASSIGNED`.
-* **Production Resilience & Observability:** Includes HTTP `Idempotency-Key` deduplication on `POST /rides`, a deterministic `?forceReject=true` chaos toggle for testing edge cases, and a zero-polling `GET /rides/:rideId/stream` Server-Sent Events (SSE) endpoint.
+## Core & Production Features
+
+1. **Non-Blocking Asynchronous Ingestion (`POST /rides` → `202 Accepted`):**
+   * Validates incoming rider requests via `zod`, saves initial ride state (`REQUESTED`) to Redis, pushes a `{ rideId }` job onto BullMQ, broadcasts a `REQUESTED` event, and immediately returns `202 Accepted` without blocking the HTTP thread on driver negotiation.
+2. **Distributed Concurrency Safety (`SET NX` + Lua Release):**
+   * Across 10 concurrent worker threads competing for 10 drivers (`drv_01`–`drv_10`), workers acquire an atomic short-lived lock (`SET driver:lock:<id> <rideId> PX 3000 NX`) before offering a ride and release it inside a `try/finally` block via an atomic Lua compare-and-delete script—eliminating double-assignments under heavy load.
+3. **Deterministic Retry Cap & Audit Trail:**
+   * Workers track tried driver IDs per ride in a `Set` so the same driver is never pinged twice, capping rejections at **3 distinct drivers** before transitioning to `NO_DRIVER_FOUND`. Every attempt and timestamp is persisted and exposed via `GET /rides/:rideId`.
+4. **True Broadcast Fan-Out & Idempotent Billing (Redis Pub/Sub):**
+   * State transitions are published to `ride-events-channel` and received independently by both standalone subscribers:
+     * **Billing Consumer (`billingConsumer.ts`):** Deduplicates events via `SADD billing:processed_events <eventId>` and triggers rider charges exclusively on `ASSIGNED` transitions.
+     * **Ops Monitor (`opsConsumer.ts`):** Logs every status transition in real time and maintains live system counters.
+5. **HTTP `Idempotency-Key` Deduplication:**
+   * Passing an `Idempotency-Key` header on `POST /rides` atomically claims `idempotency:<key>` in Redis (`SET ... EX 3600 NX`). Retried requests with the same key return `200 OK` with the original `rideId` (`idempotentReplay: true`) instead of booking duplicate rides.
+6. **Deterministic Chaos Testing Toggle (`?forceReject=true`):**
+   * Appending `?forceReject=true` (or `X-Simulate-Reject: true`) forces all 3 drivers to reject that ride, making the 3-rejection cap and `NO_DRIVER_FOUND` fan-out deterministically verifiable on the first try.
+7. **Zero-Polling Real-Time Status Stream (`GET /rides/:rideId/stream`):**
+   * Opens a Server-Sent Events (`text/event-stream`) connection backed by Redis Pub/Sub that pushes live transitions (`REQUESTED` → `ASSIGNED` / `NO_DRIVER_FOUND`) to clients and automatically closes upon reaching a terminal state.
 
 ---
 
-## Quick Start (Docker Compose)
+## Docker Containers & Service Architecture
 
-Launch all 5 containers (`redis`, `api`, `worker`, `billing-consumer`, `ops-consumer`) with healthcheck-ordered startup:
+The stack runs as **5 isolated Docker services** orchestrated via `docker-compose.yml` with healthcheck-ordered startup:
 
-```bash
-# 1. Build and start the full stack in detached mode
-docker compose up --build -d
-
-# 2. Verify all 5 services are running
-docker compose ps
-
-# 3. Run the 100-ride concurrency & invariant verification suite
-npm run test:load
-
-# 4. Inspect independent fan-out logs across both consumers
-docker compose logs billing-consumer --tail=25
-docker compose logs ops-consumer --tail=25
-
-# 5. Tear down containers when done
-docker compose down
-```
-
-### Local Development (Without Docker for Node Services)
-
-```bash
-# Start Redis locally (or via Docker: docker run -d -p 6379:6379 redis:7-alpine)
-npm install
-
-# Run each service in a separate terminal
-npm run dev:api
-npm run dev:worker
-npm run dev:billing
-npm run dev:ops
-```
+| Container Service | Entrypoint / Image | Responsibility |
+| :--- | :--- | :--- |
+| **`redis`** | `redis:7-alpine` (Port `6379`) | Primary JSON ride store (`ride:<id>`), distributed lock manager (`SET NX`), BullMQ backing store, and Pub/Sub event broker. Configured with a `redis-cli ping` healthcheck. |
+| **`api`** | `src/api/server.ts` (Port `3000`) | Express v5 REST & SSE server handling `POST /rides`, `GET /rides/:rideId`, `GET /rides/:rideId/stream`, and `GET /health`. |
+| **`worker`** | `src/worker/dispatchWorker.ts` | BullMQ consumer (`concurrency: 10`) executing driver selection, atomic lock acquisition, offer simulation, retry caps, and terminal event publishing. |
+| **`billing-consumer`** | `src/consumers/billingConsumer.ts` | Standalone Redis Pub/Sub subscriber performing event-ID deduplication and triggering rider charges on `ASSIGNED` events. |
+| **`ops-consumer`** | `src/consumers/opsConsumer.ts` | Standalone Redis Pub/Sub subscriber logging every state transition (`REQUESTED`, `ASSIGNED`, `NO_DRIVER_FOUND`) and tracking running totals. |
 
 ---
 
 ## API Endpoints
 
-### 1. Book a Ride (`POST /rides`)
-Supports optional `Idempotency-Key` header deduplication and `?forceReject=true` (or `X-Simulate-Reject: true`) deterministic chaos testing.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/rides` | Books a ride (`202 Accepted`). Supports `Idempotency-Key` header and `?forceReject=true` query param. |
+| `GET` | `/rides/:rideId` | Fetches current ride state, assigned driver, and full driver attempt audit trail. |
+| `GET` | `/rides/:rideId/stream` | Streams real-time ride status transitions via Server-Sent Events (SSE) until terminal state. |
+| `GET` | `/health` | Returns API and Redis connectivity health status. |
 
-```bash
-curl -X POST http://localhost:3000/rides \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: booking-req-001" \
-  -d '{
-    "riderId": "rider_001",
-    "pickupLocation": "Bandra West, Mumbai",
-    "dropoffLocation": "Powai, Mumbai"
-  }'
+---
+
+## Live Demo Walkthrough (Feature-by-Feature Commands)
+
+Use this sequence to demonstrate every service and feature directly from the terminal (PowerShell commands shown):
+
+### 1. Start the 5-Container Stack & Open Live Consumer Logs
+Start all containers with a clean Redis state, and open two extra terminal panes to watch both Pub/Sub consumers react simultaneously:
+
+```powershell
+# Terminal 1: Build and start all 5 services cleanly
+docker compose up --build -d
+docker compose exec redis redis-cli FLUSHALL
+docker compose ps
+
+# Terminal 2 (Program A — Billing Live Stream):
+docker compose logs -f billing-consumer
+
+# Terminal 3 (Program B — Ops Monitor Live Stream):
+docker compose logs -f ops-consumer
 ```
 
-**Response (`202 Accepted` on creation, `200 OK` on idempotent replay):**
-```json
-{
-  "rideId": "ride_9f3a1c2e",
-  "status": "REQUESTED",
-  "message": "Ride request accepted and queued for dispatch"
-}
+### 2. Demonstrate Async Ride Booking, Audit Trail & Pub/Sub Fan-Out
+Book a single ride (`202 Accepted` returned immediately), inspect its full driver negotiation audit trail, and observe both `billing-consumer` and `ops-consumer` receiving the exact same events in Terminals 2 and 3:
+
+```powershell
+# Book a ride asynchronously
+$ride = Invoke-RestMethod -Method Post -Uri "http://localhost:3000/rides" -ContentType "application/json" -Body '{"riderId":"rider_yash","pickupLocation":"Bandra West, Mumbai","dropoffLocation":"Powai, Mumbai"}'
+$ride
+
+# Inspect full driver offer audit trail after worker negotiation (~2s)
+Start-Sleep -Seconds 2
+Invoke-RestMethod -Uri "http://localhost:3000/rides/$($ride.rideId)" | ConvertTo-Json -Depth 4
 ```
 
-### 2. Inspect Ride & Dispatch Audit Trail (`GET /rides/:rideId`)
-Returns current status, assigned driver, and every driver offer attempt with timestamps.
+### 3. Demonstrate `Idempotency-Key` Deduplication
+Send the same booking request twice with the same `Idempotency-Key` header—the second call safely returns `200 OK` with the existing `rideId` (`idempotentReplay: true`) without creating a duplicate job:
 
-```bash
-curl http://localhost:3000/rides/ride_9f3a1c2e
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:3000/rides" -ContentType "application/json" -Headers @{ "Idempotency-Key" = "demo-idemp-001" } -Body '{"riderId":"rider_yash"}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:3000/rides" -ContentType "application/json" -Headers @{ "Idempotency-Key" = "demo-idemp-001" } -Body '{"riderId":"rider_yash"}'
 ```
 
-### 3. Live Ride Status Stream (`GET /rides/:rideId/stream`)
-Opens a real-time **Server-Sent Events (SSE)** stream that pushes status updates (`REQUESTED` → `ASSIGNED` / `NO_DRIVER_FOUND`) without client polling and auto-closes once a terminal state is reached.
+### 4. Demonstrate Chaos Toggle (`?forceReject=true`) + Zero-Polling SSE Stream
+Trigger 3 deterministic driver rejections and watch the live Server-Sent Events stream push `REQUESTED` and auto-close on `NO_DRIVER_FOUND`:
 
-```bash
-curl -N http://localhost:3000/rides/ride_9f3a1c2e/stream
+```powershell
+$chaos = Invoke-RestMethod -Method Post -Uri "http://localhost:3000/rides?forceReject=true" -ContentType "application/json" -Body '{"riderId":"rider_chaos"}'
+curl.exe -N "http://localhost:3000/rides/$($chaos.rideId)/stream"
 ```
 
-### 4. Health Check (`GET /health`)
-```bash
-curl http://localhost:3000/health
+### 5. Demonstrate 100-Ride Concurrency Burst & Invariant Verification
+Fire 100 concurrent `POST /rides` requests simultaneously across 10 worker threads and verify zero double-assignments and zero stuck rides:
+
+```powershell
+npm run test:load
+```
+
+### 6. Tear Down Containers
+```powershell
+docker compose down
 ```
 
 ---
 
 ## Verification & Benchmark Results
 
-### 1. 100-Ride Concurrency & Invariant Verification (Task 3)
+### 1. 100-Ride Concurrency & Invariant Verification
 Firing 100 concurrent `POST /rides` requests confirms that all rides reach a terminal state (`83 ASSIGNED + 17 NO_DRIVER_FOUND = 100`) in **~7.65s** with **0 double-assignments** and **0 stuck rides**.
 
 ![100-Ride Load Test Verification](docs/screenshots/load-test-results.png)
 
-### 2. Independent Pub/Sub Fan-Out Proof (Task 2)
+### 2. Independent Pub/Sub Fan-Out Proof
 Both standalone subscribers receive 100% of published events independently without competing for messages:
 
 #### Program A — Billing Consumer (Idempotent Event Processing)
@@ -150,6 +168,4 @@ Triggers rider charges exclusively on `ASSIGNED` events while safely ignoring `N
 ![Billing Consumer Logs](docs/screenshots/billing-consumer-logs.png)
 
 #### Program B — Operations Monitor (Live State & Tally Tracking)
-Logs every ride transition (`REQUESTED`, `ASSIGNED`, `NO_DRIVER_FOUND`) in real time and maintains running system totals.
-
-![Ops Consumer Logs](docs/screenshots/ops-consumer-logs.png)
+Logs every ride
