@@ -171,3 +171,23 @@ src/
   types/        Strict domain models
   worker/       BullMQ dispatch worker
 ```
+
+## Verification & Benchmark Results
+
+### 1. 100-Ride Concurrency & Invariant Verification (Task 3)
+Firing 100 concurrent `POST /rides` requests confirms that all rides reach a terminal state (`83 ASSIGNED + 17 NO_DRIVER_FOUND = 100`) in **~7.65s** with **0 double-assignments** and **0 stuck rides**[cite: 4].
+
+![100-Ride Load Test Verification](docs/screenshots/load-test-results.png)
+
+### 2. Independent Pub/Sub Fan-Out Proof (Task 2)
+Both standalone subscribers receive 100% of published events independently without competing for messages[cite: 2, 3]:
+
+#### Program A — Billing Consumer (Idempotent Event Processing)
+Triggers rider charges exclusively on `ASSIGNED` events while safely ignoring `NO_DRIVER_FOUND` transitions[cite: 3].
+
+![Billing Consumer Logs](docs/screenshots/billing-consumer-logs.png)
+
+#### Program B — Operations Monitor (Live State & Tally Tracking)
+Logs every ride transition (`REQUESTED`, `ASSIGNED`, `NO_DRIVER_FOUND`) in real time and maintains running system totals[cite: 2].
+
+![Ops Consumer Logs](docs/screenshots/ops-consumer-logs.png)
