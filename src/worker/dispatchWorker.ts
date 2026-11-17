@@ -28,14 +28,17 @@ export function pickAvailableDriver(triedDriverIds: Set<string>): Driver | null 
   return availableDrivers[randomIndex];
 }
 
-export async function simulateDriverResponse(): Promise<boolean> {
+export async function simulateDriverResponse(forceReject = false): Promise<boolean> {
   const latency = 150 + Math.floor(Math.random() * 201);
   await sleep(latency);
+  if (forceReject) {
+    return false;
+  }
   return Math.random() < 0.5;
 }
 
 export async function processRideDispatch(
-  job: Job<{ rideId: string }>,
+  job: Job<{ rideId: string; forceReject?: boolean }>,
 ): Promise<void> {
   const { rideId } = job.data;
   const ride = await getRideById(rideId);
@@ -45,6 +48,7 @@ export async function processRideDispatch(
     return;
   }
 
+  const forceReject = Boolean(job.data.forceReject || ride.forceReject);
   const triedDriverIds = new Set<string>();
   let rejections = 0;
 
@@ -62,7 +66,7 @@ export async function processRideDispatch(
 
     try {
       triedDriverIds.add(driver.id);
-      const accepted = await simulateDriverResponse();
+      const accepted = await simulateDriverResponse(forceReject);
       const attempt: DispatchAttempt = {
         attemptNumber: triedDriverIds.size,
         driverId: driver.id,

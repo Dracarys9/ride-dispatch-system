@@ -25,6 +25,7 @@ export interface Ride {
   attempts: DispatchAttempt[];
   createdAt: string;
   updatedAt: string;
+  forceReject?: boolean;
 }
 
 export interface RideEvent {
@@ -39,4 +40,5 @@ export interface CreateRideInput {
   riderId?: string;
   pickupLocation?: string;
   dropoffLocation?: string;
+  forceReject?: boolean;
 }

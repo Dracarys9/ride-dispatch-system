@@ -27,6 +27,9 @@ export const router = Router();
 
 router.post("/", async (req: Request, res: Response, next) => {
   const idempotencyKey = req.header("Idempotency-Key")?.trim();
+  const forceReject =
+    req.query.forceReject === "true" ||
+    req.header("X-Simulate-Reject")?.toLowerCase() === "true";
   let idempotencyClaimed = false;
   let ridePersisted = false;
 
@@ -70,13 +73,14 @@ router.post("/", async (req: Request, res: Response, next) => {
       attempts: [],
       createdAt: timestamp,
       updatedAt: timestamp,
+      forceReject: Boolean(forceReject),
     };
 
     await createRide(ride);
     ridePersisted = true;
     await dispatchQueue.add(
       "dispatch-ride",
-      { rideId: candidateRideId },
+      { rideId: candidateRideId, forceReject },
       { removeOnComplete: 500, removeOnFail: 500 },
     );
     await publishRideEvent({
