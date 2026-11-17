@@ -168,4 +168,6 @@ Triggers rider charges exclusively on `ASSIGNED` events while safely ignoring `N
 ![Billing Consumer Logs](docs/screenshots/billing-consumer-logs.png)
 
 #### Program B — Operations Monitor (Live State & Tally Tracking)
-Logs every ride
+Logs every ride transition (`REQUESTED`, `ASSIGNED`, `NO_DRIVER_FOUND`) in real time and maintains running system totals.
+
+![Ops Consumer Logs](docs/screenshots/ops-consumer-logs.png)
