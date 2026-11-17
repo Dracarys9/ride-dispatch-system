@@ -1,0 +1,44 @@
+{
+  "name": "ride-dispatch-system",
+  "version": "1.0.0",
+  "description": "Asynchronous ride-hailing dispatch engine with BullMQ, Redis Pub/Sub fan-out, and concurrency safety",
+  "main": "dist/api/server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev:api": "tsx watch src/api/server.ts",
+    "dev:worker": "tsx watch src/worker/dispatchWorker.ts",
+    "dev:billing": "tsx watch src/consumers/billingConsumer.ts",
+    "dev:ops": "tsx watch src/consumers/opsConsumer.ts",
+    "start:api": "node dist/api/server.js",
+    "start:worker": "node dist/worker/dispatchWorker.js",
+    "start:billing": "node dist/consumers/billingConsumer.js",
+    "start:ops": "node dist/consumers/opsConsumer.js",
+    "test:load": "tsx src/scripts/loadTest.ts"
+  },
+  "keywords": [
+    "nodejs",
+    "typescript",
+    "bullmq",
+    "redis",
+    "distributed-systems"
+  ],
+  "author": "Yash Solanki",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "bullmq": "^6.7.7",
+    "cli-table3": "^0.6.5",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "ioredis": "^6.0.0",
+    "uuid": "^14.0.3",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
